@@ -1,30 +1,36 @@
+import Logger
+from cogs.Referee import Referee
+
+from discord.ext import commands
+
+import asyncio
 import discord
-import os
+import json
+import logging
 
-from Logger import logger
-from dotenv import load_dotenv
-from discord.ext.commands.context import Context
-
-load_dotenv()
-TOKEN = os.getenv("TOKEN", "")
+configs = json.load(open("configs.json", "r"))
 
 intents = discord.Intents.default()
 intents.message_content = True
 intents.presences = True
 intents.members = True
 
-client = discord.Client(intents=intents)
+bot = commands.Bot(description="Osu!Irc bot", command_prefix=configs["prefix"], intents=intents)
+logger = logging.getLogger()
 
-@client.event
+@bot.event
 async def on_ready():
-    logger.info(f'Logged in as {client.user}')
+    logger.info(f'Logged in as {bot.user}')
+    await bot.tree.sync()
 
-@client.event
-async def on_message(ctx: Context):
-    if ctx.author == client.user:
-        return
+async def main():
+    async with bot:
+        await bot.add_cog(Referee(bot, configs["nick"], configs["pass"]))
+        await bot.start(configs["token"])
 
-    if ctx.message.content.startswith('$hello'):
-        await ctx.channel.send('Hello!')
-
-client.run(TOKEN, log_handler=None)
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        logger.error(e)
+        raise e

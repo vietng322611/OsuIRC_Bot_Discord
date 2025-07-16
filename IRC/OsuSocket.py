@@ -1,7 +1,7 @@
 from time import sleep
 
 from . import Utils
-from .Manager import manager
+from .IrcManager import ircManager
 from .Parser import parse
 from .Exceptions import ConnectionError, OsuCredentialsIncorrect, NoSuchChannel
 
@@ -13,51 +13,46 @@ class OsuSocket:
     def __init__(self) -> None:
         self.socket                    = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.logger                    = logging.getLogger('OsuSocket')
-        self.queue: asyncio.Queue[str] = asyncio.Queue(128)
-        self.disconnect                = False
+        self.threadLoop                = Utils.ThreadLoop()
+        self._stop_event               = asyncio.Event()
 
     def start(self, nick: str, passw: str):
         try:
-            asyncio.run(self.connect(nick, passw))
-        except OsuCredentialsIncorrect as e:
+            self.threadLoop.start_async()
+            task = self.threadLoop.submit_async(self.connect(nick, passw))
+            if task:
+                task.result() # ensure connect finished before submit `monitor_connection`
+        except Exception as e:
             self.logger.error(e, exc_info=True)
             raise e
-        except ConnectionError as e:
-            self.logger.exception(e, exc_info=True)
-            raise e
         
-        self.logger.info("Osu!IRC authenticated")
+        self.threadLoop.submit_async(self.monitor_connection())
 
-        async def monitor_connection():
+    def start_blocking(self, nick: str, passw: str):
+        async def  _():
             while True:
-                if self.disconnect:
-                    self.logger.info("Disconnected, trying to reconnect")
-                    try:
-                        await self.reconnect()
-                    except Exception as e:
-                        self.logger.exception(e, exc_info=True)
-                        return
-                await asyncio.sleep(1)
+                await asyncio.sleep(30)
 
+        self.start(nick, passw)
         try:
-            asyncio.run(monitor_connection())
+            asyncio.run(_())
         except KeyboardInterrupt:
             pass
         finally:
             self.cleanup()
     
     def cleanup(self):
-        self.disconnect = True
-        Utils.stop_async()
+        self._stop_event.set()
+        self.threadLoop.stop_async()
         try:
             self.socket.shutdown(socket.SHUT_RDWR)
         except Exception as e:
             self.logger.exception(e, exc_info=True)
         finally:
             self.socket.close()
-        self.disconnect = False
+        self._stop_event = asyncio.Event()
 
-    async def connect(self, nick: str, passw: str):
+    async def connect(self, nick: str, passw: str) -> int:
         def try_connect(retry_count: int):
             try:
                 self.socket.connect(("irc.ppy.sh", 6667))
@@ -67,26 +62,43 @@ class OsuSocket:
                     return try_connect(retry_count + 1)
             except socket.error as err:
                 raise ConnectionError(str(err))
-            
+        
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-        try_connect(0)
+        await asyncio.to_thread(try_connect, 0)
         await self.authenticate(nick, passw)
 
-        self.start_services(self.recv, self.keep_alive, self.read_line)
+        self.logger.info("Osu!IRC authenticated")
 
-        manager.clear()
-        manager.nick = nick
-        manager.passw = passw
-        
+        self.start_services(self.recv, self.keep_alive)
+
+        chat_list = ircManager.chat_list.copy()
+        ircManager.clear()
+        ircManager.nick = nick
+        ircManager.passw = passw
+
+        for chat, _ in chat_list.items():
+            await self.join(chat)
         await self.join("BanchoBot")
-        await self.join("#thisisnotarealchat")
+
+        return 0
+
+    async def monitor_connection(self):
+        while True:
+            if self._stop_event.is_set():
+                self.logger.info("Disconnected, trying to reconnect")
+                try:
+                    await self.reconnect()
+                except Exception as e:
+                    self.logger.exception(e, exc_info=True)
+                    return
+            await asyncio.sleep(1)
 
     async def authenticate(self, nick: str, passw: str):
         self.send("PASS %s" % passw)
         self.send("NICK %s" % nick)
         remain = ""
-        while not self.disconnect:
+        while not self._stop_event.is_set():
             try:
                 response: str = self.socket.recv(1024).decode("utf-8")
                 response = remain + response
@@ -96,80 +108,59 @@ class OsuSocket:
                     match line[1]:
                         case "464":
                             raise OsuCredentialsIncorrect
-                            
                         case "376":
-                            for j in range(i+1, len(data)):
-                                await self.queue.put(data[j])
                             return
                 remain = data.pop()
                 await asyncio.sleep(0.05)
             except Exception as e:
-                self.disconnect = True
+                self._stop_event.set()
                 raise e
         raise ConnectionError("Disconnected during authentication")
     
     def start_services(self, *args):
-        if len(args) < 1: return
-
-        for service in args:
-            Utils.submit_async(service())
-
-    async def logout(self):
-        try:
-            self.send("QUIT")
-        except Exception as e:
-            self.logger.exception(e, exc_info=True)
-            raise e
+        if len(args) > 0:
+            for service in args:
+                self.threadLoop.submit_async(service())
 
     async def reconnect(self):
         self.cleanup()
-        await self.connect(manager.nick, manager.passw)
+        await self.connect(ircManager.nick, ircManager.passw)
 
     async def recv(self):
         remain = ""
-        while not self.disconnect:
+        while not self._stop_event.is_set():
             try:
                 response: str = remain + self.socket.recv(1024).decode("utf-8")
                 data = response.split("\n")
                 remain = data.pop()
-                for line in data:
-                    line = line.strip()
-                    if (line == ""): continue
-                    await self.queue.put(line)
+                for msg in data:
+                    msg = msg.strip()
+                    if (msg == ""): continue
+                    parsed_msg = parse(msg)
+                    if len(parsed_msg) != 0:self.logger.debug(msg)
+                    ircManager.update(parsed_msg)
+                    if hasattr(self, '_join_events'):
+                        if parsed_msg[2] != ircManager.nick: continue
+                        chat_added_event, _ = self._join_events
+                        chat_added_event.set()
                 await asyncio.sleep(0.05)
+            except NoSuchChannel as e:
+                if hasattr(self, '_join_events'):
+                    _, exception_event = self._join_events
+                    exception_event.set()
+                self.logger.error(e, exc_info=True)
+                await asyncio.sleep(0.05)
+                continue
             except asyncio.CancelledError:
                 self.logger.debug("Cancelling recv")
                 return
             except Exception as e:
                 self.logger.exception(e, exc_info=True)
-                self.disconnect = True
-                return
-
-    async def read_line(self):
-        while not self.disconnect:
-            try:
-                msg = await self.queue.get()
-                if msg != "":
-                    if msg.find("QUIT") == -1: self.logger.debug(msg)
-                    if msg == "PING cho.ppy.sh":
-                        self.send(msg)
-                    parsed_msg = parse(msg)
-                    manager.update(parsed_msg)
-                await asyncio.sleep(0.05)
-            except NoSuchChannel as e:
-                self.logger.error(e, exc_info=True)
-                await asyncio.sleep(0.05)
-                continue
-            except asyncio.CancelledError:
-                self.logger.debug("Cancelling read_line")
-                return
-            except Exception as e:
-                self.disconnect = True
-                self.logger.exception(e, exc_info=True)
+                self._stop_event.set()
                 return
 
     async def keep_alive(self):
-        while not self.disconnect:
+        while not self._stop_event.is_set():
             try:
                 self.send("KEEP_ALIVE")
                 await asyncio.sleep(30)
@@ -177,7 +168,7 @@ class OsuSocket:
                 self.logger.debug("Cancelling keep_alive")
                 return
             except Exception as e:
-                self.disconnect = True
+                self._stop_event.set()
                 self.logger.exception(e, exc_info=True)
                 return
 
@@ -185,23 +176,45 @@ class OsuSocket:
         try:
             self.socket.sendall(bytes(message + '\n', encoding="utf-8"))
         except Exception as e:
-            self.disconnect = True
+            self._stop_event.set()
             self.logger.exception(e, exc_info=True)
 
-    async def join(self, chat: str):
-        if not manager.get_chat(chat):
+    async def join(self, chat: str) -> bool:
+        if not ircManager.get_chat(chat):
             if chat.startswith('#'):
                 self.send(f"JOIN {chat}")
+                chat_added_event = asyncio.Event()
+                exception_event = asyncio.Event()
+                self._join_events = (chat_added_event, exception_event)
+                
+                try:
+                    _, pending = await asyncio.wait(
+                        [
+                            asyncio.create_task(chat_added_event.wait()),
+                            asyncio.create_task(exception_event.wait())
+                        ],
+                        return_when=asyncio.FIRST_COMPLETED
+                    )
+                    
+                    for task in pending:
+                        task.cancel()
+                    
+                    if exception_event.is_set():
+                        return False
+                finally:
+                    del self._join_events
             else:
-                manager.add_chat(chat)
+                ircManager.add_chat(chat)
+        return True
         
     
     def part(self, chat: str):
-        if manager.get_chat(chat):
+        if ircManager.get_chat(chat):
             self.send(f"PART {chat}")
-            manager.remove_chat(chat)
+            ircManager.remove_chat(chat)
 
     async def privmsg(self, chat: str, message: str):
-        if not manager.get_chat(chat):
+        if not ircManager.get_chat(chat):
             await self.join(chat)
         self.send(f"PRIVMSG {chat} {message}")
+        

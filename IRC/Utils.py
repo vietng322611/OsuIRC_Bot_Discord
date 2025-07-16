@@ -4,19 +4,23 @@ from threading import Thread
 import logging
 import asyncio
 
-def start_async():
-    loop = asyncio.get_event_loop()
-    Thread(target=loop.run_forever).start()
-    return loop
+class ThreadLoop:
+    def __init__(self) -> None:
+        self.loop: asyncio.AbstractEventLoop | None = None
 
-_loop = start_async()
+    def start_async(self):
+        if self.loop: return
+        self.loop = asyncio.new_event_loop()
+        Thread(target=self.loop.run_forever, daemon=True).start()
 
-def submit_async(coro) -> Future:
-    return asyncio.run_coroutine_threadsafe(coro, _loop)
+    def submit_async(self, coro) -> Future | None:
+        if self.loop:
+            return asyncio.run_coroutine_threadsafe(coro, self.loop)
+        return None
 
-def stop_async():
-    if _loop and _loop.is_running():
-        _loop.call_soon_threadsafe(_loop.stop)
+    def stop_async(self):
+        if self.loop and self.loop.is_running():
+            self.loop.call_soon_threadsafe(self.loop.stop)
 
 def setup_logging(
     *,

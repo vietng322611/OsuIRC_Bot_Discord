@@ -2,6 +2,7 @@ from typing import Any
 from datetime import datetime
 
 import re
+import asyncio
 
 class Channel:
     def __init__(self, name: str) -> None:
@@ -40,9 +41,15 @@ class Channel:
         self.messages.append(message)
         self.staged_messages.append(message)
 
+        if hasattr(self, '_match_event'):
+            _match_event, _pattern = self._match_event
+            found = re.search(_pattern, message)
+            if found:
+                _match_event.set()
+                self._match_result = found.groups()
+
         for pattern, action in self.patterns.items():
             found = re.search(pattern, message)
-            
             if found:
                 action(found.group(1))
                 return
@@ -50,7 +57,32 @@ class Channel:
     def get_all_messages(self) -> list[str]:
         return self.messages
     
-    def get_staged_message(self) -> list[str]:
+    def get_staged_messages(self) -> list[str]:
         messages = self.staged_messages.copy()
         self.staged_messages = []
         return messages
+    
+    async def listen_for_pattern(self, pattern: str) -> tuple[str | Any, ...]:
+        match_event = asyncio.Event()
+        self._match_event = (match_event, pattern)
+        try:
+            _, pending = await asyncio.wait(
+                [
+                    asyncio.create_task(match_event.wait())
+                ],
+                return_when = asyncio.FIRST_COMPLETED,
+                timeout = 10
+            )
+            for task in pending:
+                task.cancel()
+
+            if not match_event.is_set():
+                return tuple()
+            
+            if hasattr(self, '_match_result'):
+                return self._match_result
+            return tuple()
+        finally:
+            del self._match_event
+            if hasattr(self, '_match_result'):
+                del self._match_result

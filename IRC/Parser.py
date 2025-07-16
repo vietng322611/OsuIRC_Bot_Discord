@@ -2,12 +2,11 @@ from .Exceptions import NoSuchChannel
 
 def parse(message: str) -> list[str]:
     '''
+        :[name]!cho@ppy.sh QUIT :quit
         :cho.ppy.sh 353 [nick] = [channel_name] :[name_list]
         :[name]!cho@ppy.sh PRIVMSG [channel_name] :[message]
         :cho.ppy.sh 403 [nick] [channel_name] :No such channel
     '''
-    if message.startswith("PING"): return []
-
     data = message.split(":")
     mData = data[1].split(" ")
 
@@ -19,7 +18,7 @@ def parse(message: str) -> list[str]:
             raise NoSuchChannel(mData[3])
         case "323" |"353":
             # indicator, channel, username
-            retData += ["0", mData[4], data[2].split(" ")]
+            retData += ["0", mData[4]] + data[2].split(" ")
 
         case "JOIN":
             # indicator, channel, username
