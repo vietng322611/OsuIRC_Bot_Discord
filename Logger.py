@@ -26,11 +26,11 @@ FORMATS = {
 }
 
 LOGGERS = {
-    'root'     : logging.DEBUG,
-    'discord'  : logging.INFO,
-    'asyncio'  : logging.WARNING,
-    'OsuSocket': logging.DEBUG,
-    'Manager'  : logging.DEBUG,
+    'root'       : logging.DEBUG,
+    'discord'    : logging.INFO,
+    'asyncio'    : logging.INFO,
+    'OsuSocket'  : logging.DEBUG,
+    'IrcManager' : logging.DEBUG,
 }
 
 class CustomFormatterFile(logging.Formatter):
