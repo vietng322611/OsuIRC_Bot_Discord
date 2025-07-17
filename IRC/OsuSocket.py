@@ -4,6 +4,7 @@ from . import Utils
 from .IrcManager import ircManager
 from .Parser import parse
 from .Exceptions import ConnectionError, OsuCredentialsIncorrect, NoSuchChannel
+from .Channel import Channel
 
 import socket
 import asyncio
@@ -11,22 +12,26 @@ import logging
 
 class OsuSocket:
     def __init__(self) -> None:
-        self.socket                    = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.logger                    = logging.getLogger('OsuSocket')
-        self.threadLoop                = Utils.ThreadLoop()
-        self._stop_event               = asyncio.Event()
+        self.socket                       = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.logger                       = logging.getLogger('OsuSocket')
+        self.threadLoop                   = Utils.ThreadLoop()
+        self._stop_event                  = asyncio.Event()
+        self._pending_messages: list[str] = []
 
     def start(self, nick: str, passw: str):
         try:
             self.threadLoop.start_async()
             task = self.threadLoop.submit_async(self.connect(nick, passw))
             if task:
-                task.result() # ensure connect finished before submit `monitor_connection`
+                task.result() # ensure `connect`` finished before submit `monitor_connection`
+            self.threadLoop.submit_async(self.monitor_connection())
+
+            for message in self._pending_messages:
+                self.send(message)
+            self._pending_messages.clear()
         except Exception as e:
             self.logger.error(e, exc_info=True)
             raise e
-        
-        self.threadLoop.submit_async(self.monitor_connection())
 
     def start_blocking(self, nick: str, passw: str):
         async def  _():
@@ -92,6 +97,7 @@ class OsuSocket:
                 except Exception as e:
                     self.logger.exception(e, exc_info=True)
                     return
+                self.logger.info("Reconnected successfully")
             await asyncio.sleep(1)
 
     async def authenticate(self, nick: str, passw: str):
@@ -178,8 +184,9 @@ class OsuSocket:
         except Exception as e:
             self._stop_event.set()
             self.logger.exception(e, exc_info=True)
+            self._pending_messages.append(message)
 
-    async def join(self, chat: str) -> bool:
+    async def join(self, chat: str) -> (Channel | None):
         if not ircManager.get_chat(chat):
             if chat.startswith('#'):
                 self.send(f"JOIN {chat}")
@@ -200,12 +207,12 @@ class OsuSocket:
                         task.cancel()
                     
                     if exception_event.is_set():
-                        return False
+                        return None
                 finally:
                     del self._join_events
             else:
                 ircManager.add_chat(chat)
-        return True
+        return ircManager.get_chat(chat)
         
     
     def part(self, chat: str):

@@ -1,4 +1,4 @@
-import Logger
+import Logger # static import for logger setup
 from cogs.Referee import Referee
 
 from discord.ext import commands
@@ -25,7 +25,7 @@ async def on_ready():
 
 async def main():
     async with bot:
-        await bot.add_cog(Referee(bot, configs["nick"], configs["pass"]))
+        await bot.add_cog(Referee(bot, configs["nick"], configs["pass"], configs["irc_channel_id"]))
         await bot.start(configs["token"])
 
 if __name__ == "__main__":
