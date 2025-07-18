@@ -135,6 +135,9 @@ class OsuSocket:
                 data = response.split("\n")
                 remain = data.pop()
                 for msg in data:
+                    if msg.strip() == "PING cho.ppy.sh":
+                        self.send("PING cho.ppy.sh")
+                        continue
                     parsed_msg = parse(msg)
                     if len(parsed_msg):
                         self.logger.debug(msg)
