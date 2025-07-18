@@ -135,15 +135,14 @@ class OsuSocket:
                 data = response.split("\n")
                 remain = data.pop()
                 for msg in data:
-                    msg = msg.strip()
                     parsed_msg = parse(msg)
-                    if not len(parsed_msg): continue
-                    self.logger.debug(msg)
-                    ircManager.update(parsed_msg)
-                    if hasattr(self, '_join_events'):
-                        if parsed_msg[2] != ircManager.nick: continue
-                        chat_added_event, _ = self._join_events
-                        chat_added_event.set()
+                    if len(parsed_msg):
+                        self.logger.debug(msg)
+                        ircManager.update(parsed_msg)
+                        if hasattr(self, '_join_events'):
+                            if parsed_msg[2] == ircManager.nick:
+                                chat_added_event, _ = self._join_events
+                                chat_added_event.set()
                 await asyncio.sleep(0.05)
             except NoSuchChannel as e:
                 if hasattr(self, '_join_events'):
