@@ -10,7 +10,6 @@ class Channel:
         self.type                                = self.resolve_chat_type(name)
         self.id                                  = 0
         self.users:    set[str]                  = set()
-        self.messages: list[str]                 = []
         self.staged_messages: list[str]          = []
         self.patterns: dict[str, Any]            = {
             r"BanchoBot : (.*) joined in slot \\d.": self.add_user,
@@ -38,7 +37,6 @@ class Channel:
         current_time = datetime.now().strftime("%H:%M:%S")
         message = "[%s] %s: %s" % (current_time, data[2], data[3])
 
-        self.messages.append(message)
         self.staged_messages.append(message)
 
         if hasattr(self, '_match_event'):
@@ -53,9 +51,6 @@ class Channel:
             if found:
                 action(found.group(1))
                 return
-
-    def get_all_messages(self) -> list[str]:
-        return self.messages
     
     def get_staged_messages(self) -> list[str]:
         messages = self.staged_messages.copy()
