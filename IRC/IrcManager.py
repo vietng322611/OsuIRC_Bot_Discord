@@ -30,8 +30,6 @@ class IrcManager:
             del self.chat_list[name]
 
     def update(self, data: list[str]):
-        if len(data) == 0: return
-
         name = data[1]
         try:
             match (data[0]):
