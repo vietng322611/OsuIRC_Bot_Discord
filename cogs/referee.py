@@ -8,6 +8,11 @@ from IRC.IrcManager import ircManager
 import discord
 import logging
 import asyncio
+import tempfile
+
+# idk i think this is important somehow
+def to_name(thread_name: str) -> str:
+    return thread_name.split("-")[1]
 
 class Referee(commands.Cog):
     def __init__(self, bot: commands.Bot, nick: str, passw: str, channel_id: int) -> None:
@@ -32,12 +37,11 @@ class Referee(commands.Cog):
         if not isinstance(channel, discord.TextChannel):
             self.logger.debug(f"ID {self.channel_id} is not a text channel")
         else:
-            self.logger.info(f"Fetching all active threads and 20 recent archived threads in channel: {channel.name}")
-            # Fetch active threads in cache
-            self.threads.update(channel.threads)
-            # Fetch 20 recent archived threads
-            async for thread in channel.archived_threads(limit=20):
-                self.threads.add(thread)
+            self.logger.info(f"Fetching all active threads in channel: {channel.name}")
+            for thread in channel.threads:
+                name = thread.name
+                if name.startswith("match-#mp_") or name.startswith("channel-#"):
+                    self.threads.add(thread)
             self.logger.info(f"Found {len(self.threads)} threads")
         self.thread_update_task = asyncio.create_task(self.update_threads())
 
@@ -53,12 +57,12 @@ class Referee(commands.Cog):
                     channel = await channel.edit(archived=False)
                     self.threads.add(channel)   
                 except discord.Forbidden:
-                    self.logger.error(f"Failed to unarchive thread {channel.name}, missing permissions")
+                    self.logger.exception(f"Failed to unarchive thread {channel.name}, missing permissions")
                     return
                 except discord.HTTPException as e:
-                    self.logger.error(f"Failed to unarchive thread {channel.name}: {e}")
+                    self.logger.exception(f"Failed to unarchive thread {channel.name}: {e}")
                     return
-            await self.osu_socket.privmsg(channel.name, message.content)
+            await self.osu_socket.privmsg(to_name(channel.name), message.content)
     
     async def cog_unload(self):
         if hasattr(self, "thread_update_task"):
@@ -67,29 +71,31 @@ class Referee(commands.Cog):
     async def update_threads(self):
         while True:
             for thread in self.threads.copy():
-                chat = ircManager.get_chat(thread.name)
+                # assume that archived threads are disbanded matches
+                if thread.archived:
+                    self.threads.remove(thread)
+                    continue
+
+                chat = ircManager.get_chat(to_name(thread.name))
                 if chat:
                     messages = chat.get_staged_messages()
                     asyncio.create_task(self.send_messages_to_thread(thread, messages))
                 else:
+                    self.threads.remove(thread) # prevent concurrency issue
                     # avoid blocking when waiting to join a chat
                     asyncio.create_task(self.validate_thread(thread))
             await asyncio.sleep(0.5)
-        
+
     async def validate_thread(self, thread: discord.Thread):
-        channel = await self.osu_socket.join(thread.name)
-        if not channel:
-            self.threads.remove(thread)
+        channel = await self.osu_socket.join(to_name(thread.name))
+        if channel:
+            self.threads.add(thread)
 
     async def send_messages_to_thread(self, thread: discord.Thread, messages: list[str]):
         tasks = []
         for message in messages:
             tasks.append(thread.send(message))
         await asyncio.gather(*tasks, return_exceptions = True)
-    
-    async def send_to_thread_and_match(self, thread: discord.Thread, message: str):
-        await self.osu_socket.privmsg(thread.name, message)
-        await thread.send(message)
 
     async def create_thread(
         self,
@@ -104,7 +110,7 @@ class Referee(commands.Cog):
             self.threads.add(thread)
             return thread
         except Exception as e:
-            self.logger.error(e)
+            self.logger.exception(e)
             match e:
                 case discord.Forbidden:
                     await interaction.followup.send("I don't have permissions to create a thread")
@@ -134,7 +140,7 @@ class Referee(commands.Cog):
         
         thread = await self.create_thread(
             interaction,
-            f"#mp_{matches[0]}",
+            f"match-#mp_{matches[0]}",
             f"Created match: https://osu.ppy.sh/mp/{matches[0]}"
         )
         if not thread: return
@@ -142,7 +148,8 @@ class Referee(commands.Cog):
         if player_ping:
             await interaction.followup.send(player_ping)
         if lobby_settings:
-            await self.send_to_thread_and_match(thread, lobby_settings)
+            await self.osu_socket.privmsg(to_name(thread.name), lobby_settings)
+            await thread.send(lobby_settings)
     
     @app_commands.command(name="join", description="Join an existing chat")
     async def join(self, interaction: discord.Interaction, name: str):
@@ -155,21 +162,57 @@ class Referee(commands.Cog):
             try:
                 await interaction.followup.send(f"Failed to join chat *{name}*")
             except Exception as e:
-                self.logger.error(e)
+                self.logger.exception(e)
             finally:
                 return
         else:
+            if name.startswith("#mp_"):
+                name = f"match-{name}"
+            else:
+                name = f"channel-{name}"
             await self.create_thread(
                 interaction,
                 name,
                 f"Creating new thread for chat *{name}*"
             )
 
-    @app_commands.command(name="export", description="Export chat log to a file")
+    @app_commands.command(name="export", description="Export chat log to a file (max 3000 messages)")
     async def export(
         self,
-        interaction: discord.Interaction,
-        *,
-        name: Optional[str] = None
+        interaction: discord.Interaction
     ):
-        raise NotImplementedError
+        await interaction.response.defer()
+        channel = interaction.channel
+        if not isinstance(channel, discord.Thread):
+            await interaction.followup.send("This command can only be used in a thread")
+            return
+        
+        name = channel.name
+        if not name.startswith("match-#mp_") and not name.startswith("channel-#"):
+            await interaction.followup.send("This command can only be used in a match or channel thread")
+            return
+        
+        name = to_name(name)
+        try:
+            with tempfile.NamedTemporaryFile(mode='w+', encoding='utf-8', suffix='.txt', delete=True) as temp_file:
+                temp_file.write(f"Chat log for {name}\n")
+                temp_file.write("--- Start of chat log ---\n")
+                async for message in channel.history(limit=3000):
+                    if message.author == self.bot.user:
+                        temp_file.write(message.content + "\n")
+                    else:
+                        timestamp = message.created_at.strftime("%H:%M:%S")
+                        temp_file.write(f"[{timestamp}] {message.author.name}: {message.content}\n")
+                temp_file.write("--- End of chat log ---")
+                temp_file.flush()
+                temp_file.seek(0)
+                await interaction.followup.send(file=discord.File(fp=temp_file.name, filename=f"{name}.txt"))
+        except discord.Forbidden:
+            self.logger.exception(f"Failed to read messages in thread {channel.name}, missing permissions")
+            await interaction.followup.send("I don't have permissions to read messages in this thread")
+        except discord.HTTPException as e:
+            self.logger.exception(f"Failed to retrieve channel history: {e}")
+            await interaction.followup.send("Failed to export chat log due to an error")
+        except Exception as e:
+            self.logger.exception(f"Unexpected error while exporting chat log: {e}")
+            await interaction.followup.send("An unexpected error occurred while exporting the chat log")
